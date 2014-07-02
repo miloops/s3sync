@@ -53,6 +53,8 @@
 #     puts g.next
 #   end
 #
+require 'fiber'
+
 class Generator
   include Enumerable
 
@@ -71,31 +73,33 @@ class Generator
     end
     @index = 0
     @queue = []
+    @root_thread = Fiber.current
     @main_thread = nil
-    @loop_thread.kill if defined?(@loop_thread)
-    @loop_thread = Thread.new do
-      Thread.stop
+    
+    @loop_thread = Fiber.new {
+      Fiber.yield
       begin
         @block.call(self)
-      rescue
+      rescue Exception => e
+        puts "Error: #{e.inspect}\n#{e.backtrace.join("\n")}"
         @main_thread.raise $!
       ensure
-        @main_thread.wakeup
+        @main_thread.resume if @main_thread
       end
-    end
-    Thread.pass until @loop_thread.stop?
+    }
+    @loop_thread.transfer until !@loop_thread.alive?
     self
   end
 
   # Yields an element to the generator.
   def yield(value)
-    if Thread.current != @loop_thread
+    if Fiber.current != @loop_thread
       raise "should be called in Generator.new{|g| ... }"
     end
     begin
       @queue << value
-      @main_thread.wakeup
-      Thread.stop
+      @main_thread.resume if @main_thread
+      Fiber.yield
     end
     self
   end
@@ -107,10 +111,10 @@ class Generator
         raise "should not be called in Generator.new{|g| ... }"
       end
       begin
-        @main_thread = Thread.current
-        @loop_thread.wakeup
-        Thread.stop
-      rescue ThreadError
+        @main_thread = Fiber.current
+        @loop_thread.resume
+        Fiber.yield
+      rescue FiberError
         # ignore
       ensure
         @main_thread = nil
@@ -216,16 +220,16 @@ class SyncEnumerator
       count = 0
 
       ret = @gens.map { |g|
-	if g.end?
-	  count += 1
-	  nil
-	else
-	  g.next
-	end
+	      if g.end?
+      	  count += 1
+      	  nil
+      	else
+      	  g.next
+      	end
       }
 
       if count == @gens.size
-	break
+	      break
       end
 
       yield ret
